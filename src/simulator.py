@@ -114,3 +114,50 @@ def _simulate_one(machine_id: str, n_minutes: int, start: pd.Timestamp,
     # --- 습도: 온도와 약한 음의 관계 ---
     humid = 55 - 1.8 * (air - 298) + rng.normal(0, 2.5, n_minutes)
     humid = np.clip(humid, 15, 95)
+
+
+	#계산된 센서값들을 하나의 데이터프레임으로
+    df = pd.DataFrame({
+        "ts": ts,
+        "machine_id": machine_id,
+        "type": spec["type"],
+        "air_temp_k": air,
+        "process_temp_k": proc,
+        "rot_speed_rpm": rpm,
+        "torque_nm": torque,
+        "tool_wear_min": wear,
+        "vibration_mms": vib,
+        "current_a": current,
+        "humidity_pct": humid,
+    })
+
+    # ------------------------------------------------------------------
+    # 고장 라벨 (AI4I 2020 정의 그대로)
+    # 
+	# UCI AI4I 2020 데이터셋 정의 ------------------------------------------------------------------
+    
+	#공구마모고장
+    twf = (wear >= 200) & (wear <= 240) & (rng.random(n_minutes) < 0.004)
+	#방열실패
+    hdf = ((proc - air) < 8.6) & (rpm < 1380)
+	#전력이상
+    pwf = (power_w < 3500) | (power_w > 9000)
+	#과부하 고장
+    osf = (wear * torque) > spec["osf_limit"]
+	#원인 불명
+    rnf = rng.random(n_minutes) < 0.0002                 
+
+    df["twf"] = twf.astype(int)
+    df["hdf"] = hdf.astype(int)
+    df["pwf"] = pwf.astype(int)
+    df["osf"] = osf.astype(int)
+    df["rnf"] = rnf.astype(int)
+    #다섯 조건 중 하나라도 True면 True
+    #.astype(int) : True/False를 1/0 숫자로 변환
+    df["machine_failure"] = (twf | hdf | pwf | osf | rnf).astype(int)
+    df["power_w"] = power_w
+    return df
+
+
+
+	
