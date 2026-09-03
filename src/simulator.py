@@ -320,5 +320,93 @@ def pollute(truth: pd.DataFrame, seed: int = 7, cfg: dict | None = None, return_
 	t0 = df["ts"].min()
 	days = (df["ts"] - t0).dt.total_seconds() / 86400.0
 
+	# --- (a) 센서 드리프트: CNC-02 온도 센서만 서서히 위로 밀림 ---
+	# 한 대만 밀리면 센서 문제. 세 대가 다 밀리면 공정 변화
+	m2 = df["machine_id"] == "CNC-02"
+	df.loc[m2, "process_temp_k"] += c["drift_per_day"] * days[m2]
+
+
+ 	# --- (b) 단위 혼재: 특정 구간에서 온도가 섭씨로 들어옴 ---
+	n = len(df)
+	unit_block = np.zeros(n, dtype=bool)
+	n_blocks = max(1, int(n * c["unit_mix_rate"] / 200))
+	for _ in range(n_blocks):
+		s = rng.integers(0, n - 200)
+		unit_block[s:s + 200] = True
+	df.loc[unit_block, "air_temp_k"] -= 273.15
+	df.loc[unit_block, "process_temp_k"] -= 273.15
+
+	# 어디를 오염시켰는지 정답 기록 (mask)
+	masks["unit_temp"] = unit_block
+	# 진동 단위도 일부는 m/s^2 로 (×9.81)
+	vib_block = rng.random(n) < 0.04
+	df.loc[vib_block, "vibration_mms"] *= 9.81
+	masks["unit_vib"] = vib_block
+
+	# --- (c) 센서 튐: 값이 순간적으로 10~50배 또는 0 ---
+	for col in SENSOR_COLS:
+		hit = rng.random(n) < c["spike_rate"]
+		mode = rng.random(n)
+		df.loc[hit & (mode < 0.5), col] = df.loc[hit & (mode < 0.5), col] * rng.uniform(8, 40)
+		df.loc[hit & (mode >= 0.5), col] = 0.0
+		masks[f"spike_{col}"] = hit
+
+	# --- (d) 개별 결측 ---
+	# 컬럼별로 nan_rate 확률로 해당 셀만 NaN 처리.
+	for col in SENSOR_COLS:
+		hit = rng.random(n) < c["nan_rate"]
+		df.loc[hit, col] = np.nan
+		masks[f"nan_{col}"] = hit
+
+	# --- (e) 통신 끊김: 행 자체가 사라짐 ---
+	# 랜덤 시작점에서 일정 길이 (dropout_len)만큼 행 전체를 삭제
+	# x3은 설비 3대분이 동시에 빠지는 걸 표현
+	drop_mask = np.zeros(n, dtype=bool)
+	n_drop = int(n * c["dropout_rate"] / 10)
+	for _ in range(max(1, n_drop)):
+		s = rng.integers(0, n)
+		ln = rng.integers(*c["dropout_len"]) * 3      # 설비 3대 × 분
+		drop_mask[s:s + ln] = True
+	masks["dropped"] = drop_mask
+	keep = ~drop_mask
+	df = df[keep].copy()
+	kept_masks = masks[keep].copy()
+
+	# --- (f) 중복 전송 ---
+	# 남은 행 중 일부를 골라 그대로 복사해서 뒤에 이어붙임 (pd.concat)
+	# is_dup 컬럼으로 "이게 중복본이다"를 마킹
+	n2 = len(df)
+	dup_idx = rng.random(n2) < c["dup_rate"]
+	dups = df[dup_idx].copy()
+	kept_masks["is_dup"] = False
+	dup_masks = kept_masks[dup_idx].copy()
+	dup_masks["is_dup"] = True
+	df = pd.concat([df, dups], ignore_index=True)
+	kept_masks = pd.concat([kept_masks, dup_masks], ignore_index=True)
+
+	# --- (g) 타임스탬프 흔들림 + 순서 뒤섞임 ---
+	# 무작위로 흔들어서 실제 네트워크로 데이터가 들어올 때 순서 보장이 안되는 상황 재현
+	n3 = len(df)
+	jitter = np.where(rng.random(n3) < c["ts_jitter_rate"],
+					  rng.integers(-90, 90, n3), 0)
+	df["ts"] = df["ts"] + pd.to_timedelta(jitter, unit="s")
+	kept_masks["ts_jittered"] = jitter != 0
+	order = rng.permutation(n3)
+	df = df.iloc[order].reset_index(drop=True)
+	kept_masks = kept_masks.iloc[order].reset_index(drop=True)
+
+	# --- (h) 실제 수집기가 붙이는 메타 컬럼 ---
+	# 실제 DB에 적재된 시각 붙이기 (원래 발생 시각과 수집된 시각 구분하기 위함)
+	df["collected_at"] = pd.Timestamp("2024-01-01")
+	df["ts"] = df["ts"].dt.strftime("%Y-%m-%d %H:%M:%S")   # 문자열로 들어옴(현실)
+	if return_masks:
+		return df, kept_masks
+	return df
+
+
+
+
+# 실행 -> 오염된 데이터 확인
+	 
 
 	
