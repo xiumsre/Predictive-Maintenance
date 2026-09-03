@@ -407,6 +407,39 @@ def pollute(truth: pd.DataFrame, seed: int = 7, cfg: dict | None = None, return_
 
 
 # 실행 -> 오염된 데이터 확인
+# pollute를 실제로 호출해서 truth에 오염을 주입한 obs(관측데이터)와 masks(오염 위치 정답지) 생성
+obs, masks = pollute(truth, seed=7, return_masks=True)
+print("참값 행수 :", f"{len(truth):,}")
+print("관측 행수 :", f"{len(obs):,}", f"({len(obs)-len(truth):+,})")
+
+
+# 보이는 문제
+'''
+1. 정렬이 안되어있다.
+2. ts가 문자열이다
+3. 0번,2번 행의 온도가 26.3, 26.4이다.
+'''
+
+print(obs.head(3).to_string())
 	 
 
-	
+# 결측률
+'''
+결측률이 0.8% 밖에 안되지만 함정이다.
+
+통신이 끊겨서 없어진 5,009행은 여기 안 잡힘
+'''
+
+sens = ["air_temp_k","process_temp_k","rot_speed_rpm", "torque_nm","tool_wear_min", "vibration_mms", "current_a","humidity_pct"]
+print((obs[sens].isna().mean() * 100).round(2).to_string())
+
+
+
+# 단위 혼재 흔적
+print(obs["air_temp_k"].describe().round(2).to_string())
+print("200 K 미만 비율: %.2f%%" % ((obs["air_temp_k"] < 200).mean() * 100))
+
+
+# 주입 정답지
+inj = pd.DataFrame({"건수": masks.sum(), "비율(%)": (masks.mean() * 100).round(3)})
+print(inj.to_string())
