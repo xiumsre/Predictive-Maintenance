@@ -13,6 +13,20 @@ CNC 밀링 설비 3대를 1분 단위로 시뮬레이션합니다.
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+
+
+names = {f.name for f in fm.fontManager.ttflist}
+for cand in ["D2Coding"]:
+	if cand in names:
+		plt.rcParams["font.family"] = cand
+		break
+	else:
+		print("[WARN] 한글 폰트를 찾지 못했습니다.")
+	plt.rcParams["axes.unicode_minus"] = False
+
 
 
 
@@ -53,6 +67,8 @@ POLLUTION = {
 #실제처럼 부하->토크->온도->전류로 이어지는 인과관계가 있으면,
 #전류는 안 변했는데 토크만 튀었다 = 센서 오작동과 같은 이상 탐지 로직 가능
 
+
+#물리모델
 def _simulate_one(machine_id: str, n_minutes: int, start: pd.Timestamp,
                   rng: np.random.Generator) -> pd.DataFrame:
     spec = MACHINES[machine_id]
@@ -152,6 +168,7 @@ def _simulate_one(machine_id: str, n_minutes: int, start: pd.Timestamp,
     df["pwf"] = pwf.astype(int)
     df["osf"] = osf.astype(int)
     df["rnf"] = rnf.astype(int)
+    
     #다섯 조건 중 하나라도 True면 True
     #.astype(int) : True/False를 1/0 숫자로 변환
     df["machine_failure"] = (twf | hdf | pwf | osf | rnf).astype(int)
@@ -160,4 +177,84 @@ def _simulate_one(machine_id: str, n_minutes: int, start: pd.Timestamp,
 
 
 
-	
+
+# (오염 없는) 참값 만들기
+# -> 설비 3대를 합쳐서 최종 참값 데이터셋 완성	
+def simulate_truth(n_minutes: int = 1440, start: str | pd.Timestamp = "2024-01-01",
+                   seed: int = 42) -> pd.DataFrame:
+    """오염 없는 참값을 생성합니다."""
+    #난수생성기
+    rng = np.random.default_rng(seed)
+    start = pd.Timestamp(start)
+    #딕셔너리에 있는 3개 설비에 대해 각각 물리모델 함수 호출
+    parts = [_simulate_one(m, n_minutes, start, rng) for m in MACHINES]
+    out = pd.concat(parts, ignore_index=True)
+    return out.sort_values(["ts", "machine_id"]).reset_index(drop=True)
+
+
+
+
+#14일치 만들어보기
+truth = simulate_truth(n_minutes=1440 * 14, start="2024-01-01", seed=42)
+
+#기본 검산
+print("설비 수 :", truth["machine_id"].nunique())
+print("기간 :", truth["ts"].min(), "~", truth["ts"].max())
+print("행 수 :", f"{len(truth):,}")
+
+
+#고장모드 분포
+#각 고장 유형이 몇 번 발생했는지, 전체에서 몇%인지 계산
+modes = truth[["twf", "hdf", "pwf", "osf", "rnf", "machine_failure"]].sum()
+print(pd.DataFrame({"건수": modes, "비율(%)": (modes / len(truth) * 100).round(3)}))
+
+
+
+#센서 요약
+#물리적으로 말이 되는 값인지 확인
+'''
+-공기온도 293.97~307.90 K = 약 21~35 ℃ → 공장 실내로 타당합니다
+-공정온도가 공기온도보다 항상 높습니다 → 절삭열이 나니까 당연합니다
+-회전수 1,220~2,900 rpm → CNC 밀링 스펙 범위입니다
+진동 1.75~4.70 mm/s → ISO 10816 기준 "양호~주의" 구간입니다
+-전력 1,958~9,564 W → 고장 판정선(3,500 / 9,000 W)이 이 범위 안에 있습니다. 그래야 PWF가 "가끔"
+발생합니다. 범위 밖이면 고장이 0건이거나 전부 고장입니다
+'''
+cols = ["air_temp_k", "process_temp_k", "rot_speed_rpm", "torque_nm",
+"tool_wear_min", "vibration_mms", "current_a", "power_w"]
+print(truth[cols].describe().loc[["mean", "std", "min", "50%", "max"]].round(2))
+
+
+
+
+
+# 시각화 코드
+'''
+<CNC-01의 이틀치>
+1) 공구 마모가 톱니모양으로 누적되다 교체 시점에 0으로 떨어짐
+2) 토크가 일주기로 오르내림 (주간 부하 ↑, 야간 ↓)
+3) 진동이 마모 후반에 치솟음 (3제곱 관계)
+4) 빨간 세로선 - 고장 시점
+'''
+sub = truth[(truth["machine_id"] == "CNC-01")].iloc[:2880]  # 이틀치 = 1440*2분
+
+fig, axes = plt.subplots(3, 1, figsize=(10, 6), sharex=True)
+
+axes[0].plot(sub["ts"], sub["tool_wear_min"], color="steelblue")
+axes[0].set_ylabel("tool_wear_min")
+
+axes[1].plot(sub["ts"], sub["torque_nm"], color="seagreen")
+axes[1].set_ylabel("torque_nm")
+
+axes[2].plot(sub["ts"], sub["vibration_mms"], color="darkorange")
+axes[2].set_ylabel("vibration_mms")
+
+# 고장 시점에 빨간 세로선
+fail_times = sub.loc[sub["machine_failure"] == 1, "ts"]
+for ax in axes:
+    for t in fail_times:
+        ax.axvline(t, color="red", alpha=0.3)
+
+fig.suptitle("CNC-01 이틀치 참값 — 마모 누적과 교체, 그리고 고장 시점")
+plt.tight_layout()
+plt.show()
